@@ -37,6 +37,10 @@ from typing_extensions import override
 from .model import PersistantModel
 from .session import RollbackSession
 
+# Seconds a sqlite connection waits for a contended write lock before giving up
+# with "database is locked". sqlite3's own default is 5s.
+SQLITE_BUSY_TIMEOUT: Final[int] = 120
+
 
 class Base(sqlalchemy.orm.DeclarativeBase): ...
 
@@ -46,7 +50,18 @@ class SQLPersistantModel(PersistantModel):
 
     def __init__(self, db_url: str, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.engine: Final[sqlalchemy.engine.Engine] = sqlalchemy.create_engine(db_url)
+        engine_kwargs: Dict[str, Any] = {}
+        if db_url.startswith("sqlite"):
+            # All ranks of a multi-process job share one sqlite cache file, and
+            # writing a newly tuned config takes the database's single write
+            # lock. sqlite3's default busy timeout is 5s, which several ranks
+            # tuning the same shape concurrently can exceed -- the losers then
+            # raise OperationalError("database is locked") instead of waiting,
+            # aborting the process over a cache write. Wait longer instead.
+            engine_kwargs["connect_args"] = {"timeout": SQLITE_BUSY_TIMEOUT}
+        self.engine: Final[sqlalchemy.engine.Engine] = sqlalchemy.create_engine(
+            db_url, **engine_kwargs
+        )
         self.sql_model_pool: Dict[str, Type[Base]] = {}
 
     @staticmethod
